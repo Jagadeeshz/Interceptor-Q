@@ -1,0 +1,35 @@
+active: false
+connections:
+  Webhook:
+    main:
+    - - index: 0
+        node: Trigger Enrichment Workflow
+        type: main
+id: '1'
+name: Mining Trigger
+nodes:
+- name: Webhook
+  parameters:
+    httpMethod: POST
+    path: mining-trigger
+    responseData:
+      responseBody: '{"status": "triggered"}'
+      statusCode: 200
+    responseMode: onReceived
+  position:
+  - 250
+  - 300
+  type: n8n-nodes-base.webhook
+  typeVersion: 1
+  webhookId: mining-trigger-webhook
+- name: Trigger Enrichment Workflow
+  parameters:
+    additionalFields:
+      workflowId: '{{$json["workflowId"]}}'
+    operation: executeWorkflow
+  position:
+  - 500
+  - 300
+  type: n8n-nodes-base.triggerWorkflow
+  typeVersion: 1
+settings: {}
