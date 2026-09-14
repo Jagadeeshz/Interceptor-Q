@@ -1,0 +1,33 @@
+# Environment / secrets — never commit credentials
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/build/
+frontend/node_modules/
+
+# Sub-repo (Twenty CRM scaffolding lives in its own repo)
+Interceptor/
+
+# Local skills cache
+skills/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
