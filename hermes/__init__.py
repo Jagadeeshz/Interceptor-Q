@@ -1,61 +1,51 @@
-"""
-Interceptor Hermes — AI Agent Core
+"""Interceptor Hermes — AI Agent Core
 
 Provides:
 - FastAPI application with /event, /health, and dashboard REST endpoints
 - Event logging to Postgres
 - Config-driven LLM provider
-- Live data for the dashboard: companies, opportunities, signals, metrics
+- Live data: companies, opportunities, signals, metrics
 """
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import logging
 import os
-import random
+import json
+
+# Import SQLAlchemy and our models from crm
+import hermes.crm as crm
+from sqlalchemy import text, func
+
+# Import workers
+from hermes.worker_enrich import start_worker as start_enrichment_worker
+from hermes.worker_outbound import start_outbound_worker as start_outbound_worker
+from hermes.discoverer import start_discovery_scheduler, run_discovery_once
+
+# Import LLM
+from hermes.llm import generate_message
+
+# Import config for settings
+from hermes.config import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("hermes")
 
 # ---------------------------------------------------------------------------
-# Database (optional at boot — dashboard degrades gracefully to demo data)
+# Database availability flag
 # ---------------------------------------------------------------------------
-DATABASE_URL = os.getenv(
-    "POSTGRES_DATABASE_URL",
-    "postgresql://interceptor_admin:interceptor_pass@postgres:5432/hermes_db",
-)
-
-_engine = None
-
-
-def _get_engine():
-    global _engine
-    if _engine is None:
-        try:
-            from sqlalchemy import create_engine
-            _engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True, future=True)
-        except Exception as e:  # pragma: no cover
-            logger.warning(f"SQLAlchemy unavailable: {e}")
-    return _engine
-
-
-def db_query(sql: str):
-    """Run a read-only query; return list of dict rows or None when DB is down."""
-    engine = _get_engine()
-    if engine is None:
-        return None
-    try:
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            result = conn.execute(text(sql))
-            return [dict(row._mapping) for row in result]
-    except Exception as e:
-        logger.warning(f"DB query failed (falling back to demo data): {e}")
-        return None
-
+try:
+    # Test connection
+    with crm.engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    _db_available = True
+    logger.info("Database connection successful.")
+except Exception as e:
+    _db_available = False
+    logger.warning(f"Database initialization failed: {e}")
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -63,257 +53,376 @@ def db_query(sql: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Interceptor Hermes starting — dashboard API live")
+    # Start discovery worker if enabled
+    if os.getenv("ENABLE_DISCOVERY", "false").lower() == "true":
+        start_discovery_scheduler()
+        logger.info("Discovery scheduler started")
+    # Start enrichment worker
+    start_enrichment_worker()
+    logger.info("Enrichment worker started")
+    # Start outbound worker
+    start_outbound_worker()
+    logger.info("Outbound worker started")
     yield
-
 
 app = FastAPI(title="Interceptor Hermes", version="0.2.0", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---------------------------------------------------------------------------
+# Authentication middleware (API Key)
+# ---------------------------------------------------------------------------
+API_KEY = os.getenv("API_KEY")
+if API_KEY:
+    @app.middleware("http")
+    async def api_key_middleware(request: Request, call_next):
+        # Skip auth for health check and root endpoint
+        if request.url.path in ["/health", "/"]:
+            return await call_next(request)
+        key = request.headers.get("X-API-Key")
+        if key == API_KEY:
+            return await call_next(request)
+        raise HTTPException(status_code=401, detail="Invalid API Key")
 
 # ---------------------------------------------------------------------------
-# LLM config (default DeepSeek as specified)
-# ---------------------------------------------------------------------------
-HERMES_LLM_PROVIDER = os.getenv("HERMES_LLM_PROVIDER", "deepseek")
-HERMES_LLM_MODEL = os.getenv("HERMES_LLM_MODEL", "deepseek-coder-v1.5")
-
-# ---------------------------------------------------------------------------
-# Event log (in-memory ring buffer + optional DB persistence)
-# ---------------------------------------------------------------------------
-_events = []
-
-
-def _record_event(event_type: str, message: str, source: str = "system"):
-    _events.append({
-        "id": len(_events) + 1,
-        "time": datetime.now(timezone.utc).isoformat(),
-        "type": event_type,
-        "message": message,
-        "source": source,
-    })
-    if len(_events) > 200:
-        del _events[: len(_events) - 200]
-
-
-# ---------------------------------------------------------------------------
-# Demo data — used when Postgres has no rows yet so the dashboard is never blank
-# ---------------------------------------------------------------------------
-DEMO_COMPANIES = [
-    {"id": "c1", "name": "Vertex AI", "domain": "vertexai.io", "region": "NAC",
-     "source_platform": "LinkedIn", "funding_stage": "Series B", "company_size": "150",
-     "detected_date": "2026-09-12T09:14:00Z", "status": "ENRICHING"},
-    {"id": "c2", "name": "Nova Scale", "domain": "novascale.com", "region": "EU",
-     "source_platform": "Apollo", "funding_stage": "Series A", "company_size": "80",
-     "detected_date": "2026-09-12T08:02:00Z", "status": "PROSPECT_CREATED"},
-    {"id": "c3", "name": "Quantum Flow", "domain": "quantumflow.dev", "region": "APAC",
-     "source_platform": "Website", "funding_stage": "Seed", "company_size": "25",
-     "detected_date": "2026-09-12T07:40:00Z", "status": "QUALIFIED"},
-    {"id": "c4", "name": "Nebula Systems", "domain": "nebula.systems", "region": "MENA",
-     "source_platform": "LinkedIn", "funding_stage": "Series C", "company_size": "420",
-     "detected_date": "2026-09-12T06:55:00Z", "status": "DISCOVERED"},
-    {"id": "c5", "name": "Helios Grid", "domain": "heliosgrid.ai", "region": "NAC",
-     "source_platform": "Apollo", "funding_stage": "Series B", "company_size": "210",
-     "detected_date": "2026-09-11T18:22:00Z", "status": "CAMPAIGN_ACTIVE"},
-    {"id": "c6", "name": "Aurora Data", "domain": "auroradata.io", "region": "LATAM",
-     "source_platform": "Website", "funding_stage": "Seed", "company_size": "18",
-     "detected_date": "2026-09-11T16:10:00Z", "status": "BOOKED"},
-]
-
-DEMO_OPPORTUNITIES = [
-    {"id": "o1", "company_id": "c1", "company_name": "Vertex AI", "job_title": "Senior Platform Engineer",
-     "matched_pod": "Cloud Ops", "match_score": 98, "source_platform": "LinkedIn", "status": "ENRICHING",
-     "region": "NAC", "detected_date": "2026-09-12T09:20:00Z"},
-    {"id": "o2", "company_id": "c2", "company_name": "Nova Scale", "job_title": "Data Platform Lead",
-     "matched_pod": "Data Eng", "match_score": 92, "source_platform": "Apollo", "status": "PROSPECT_CREATED",
-     "region": "EU", "detected_date": "2026-09-12T08:10:00Z"},
-    {"id": "o3", "company_id": "c3", "company_name": "Quantum Flow", "job_title": "ML Infrastructure Engineer",
-     "matched_pod": "AI/ML", "match_score": 87, "source_platform": "Website", "status": "QUALIFIED",
-     "region": "APAC", "detected_date": "2026-09-12T07:45:00Z"},
-    {"id": "o4", "company_id": "c4", "company_name": "Nebula Systems", "job_title": "DevOps Manager",
-     "matched_pod": "Cloud Ops", "match_score": 81, "source_platform": "LinkedIn", "status": "DISCOVERED",
-     "region": "MENA", "detected_date": "2026-09-12T07:00:00Z"},
-    {"id": "o5", "company_id": "c5", "company_name": "Helios Grid", "job_title": "Staff SRE",
-     "matched_pod": "Cloud Ops", "match_score": 76, "source_platform": "Apollo", "status": "CAMPAIGN_ACTIVE",
-     "region": "NAC", "detected_date": "2026-09-11T18:30:00Z"},
-    {"id": "o6", "company_id": "c6", "company_name": "Aurora Data", "job_title": "Analytics Engineer",
-     "matched_pod": "Data Eng", "match_score": 71, "source_platform": "Website", "status": "BOOKED",
-     "region": "LATAM", "detected_date": "2026-09-11T16:15:00Z"},
-]
-
-DEMO_SIGNALS = [
-    {"id": 1, "time": "2026-09-12T09:22:00Z", "type": "signal", "message": "New intent signal from Vertex AI (LinkedIn)"},
-    {"id": 2, "time": "2026-09-12T09:10:00Z", "type": "system", "message": 'Company "Nova Scale" successfully enriched via Apollo'},
-    {"id": 3, "time": "2026-09-12T08:48:00Z", "type": "system", "message": "Webhook trigger: crm-company-sync received"},
-    {"id": 4, "time": "2026-09-12T08:12:00Z", "type": "signal", "message": 'Anomalous growth detected in "Quantum Flow"'},
-    {"id": 5, "time": "2026-09-12T07:30:00Z", "type": "system", "message": "HITL approval granted for Helios Grid outreach"},
-]
-
-_demo_rng = random.Random(42)
-
-
-def _demo_metrics():
-    return {
-        "leads_discovered": {"value": 1284, "trend": 12.0},
-        "enrichment_rate": {"value": 84.2, "trend": 3.1},
-        "active_signals": {"value": 42, "trend": -2.0},
-        "conversion_prob": {"value": 18.4, "trend": 0.8},
-        "source": "demo",
-    }
-
-
-def _db_metrics():
-    """Compute live metrics from Postgres; None when tables are missing/empty."""
-    rows = db_query(
-        "SELECT (SELECT COUNT(*) FROM companies) AS companies, "
-        "(SELECT COUNT(*) FROM opportunities) AS opportunities, "
-        "(SELECT COUNT(*) FROM opportunities WHERE status IN ('QUALIFIED','PROSPECT_CREATED','CAMPAIGN_ACTIVE','BOOKED')) AS qualified"
-    )
-    if not rows:
-        return None
-    r = rows[0]
-    companies = int(r["companies"] or 0)
-    opportunities = int(r["opportunities"] or 0)
-    qualified = int(r["qualified"] or 0)
-    if companies == 0 and opportunities == 0:
-        return None
-    enrich_rate = round(100.0 * qualified / opportunities, 1) if opportunities else 0.0
-    return {
-        "leads_discovered": {"value": companies, "trend": 0.0},
-        "enrichment_rate": {"value": enrich_rate, "trend": 0.0},
-        "active_signals": {"value": opportunities, "trend": 0.0},
-        "conversion_prob": {"value": round(100.0 * qualified / companies, 1) if companies else 0.0, "trend": 0.0},
-        "source": "postgres",
-    }
-
-
-def _serialize(rows):
-    out = []
-    for row in rows:
-        item = {}
-        for k, v in row.items():
-            if isinstance(v, datetime):
-                item[k] = v.isoformat()
-            elif isinstance(v, timedelta):
-                item[k] = str(v)
-            else:
-                item[k] = v
-        out.append(item)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Event receipt endpoint
-# ---------------------------------------------------------------------------
-@app.post("/event")
-async def receive_event(request: Request):
-    """Receive JSON events from Hermes agents, n8n, or external services."""
-    try:
-        event = await request.json()
-        event_type = event.get("type", "unknown")
-        logger.info(f"Received event: {event_type}")
-        message = event.get("message") or f"{event_type} received"
-        _record_event(event_type, message, source=event.get("source", "webhook"))
-        return JSONResponse({"status": "received", "event_type": event_type}, status_code=200)
-    except Exception as e:
-        logger.error(f"Error processing event: {e}")
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
-
-
-# ---------------------------------------------------------------------------
-# Health check endpoint
+# Health check
 # ---------------------------------------------------------------------------
 @app.get("/health")
-async def health_check():
-    """Health check for Docker orchestration and load balancers."""
-    db_ok = db_query("SELECT 1 AS ok") is not None
+async def health():
     return {
         "status": "ok",
         "service": "hermes",
-        "llm_provider": HERMES_LLM_PROVIDER,
-        "llm_model": HERMES_LLM_MODEL,
-        "database": "connected" if db_ok else "unavailable",
+        "llm_provider": os.getenv("LLM_PROVIDER", "deepseek"),
+        "llm_model": os.getenv("LLM_MODEL", "deepseek-coder-v1.5"),
+        "database": "connected" if _db_available else "unavailable",
     }
-
-
-# ---------------------------------------------------------------------------
-# Dashboard API
-# ---------------------------------------------------------------------------
-@app.get("/api/metrics")
-async def api_metrics():
-    """KPI cards — live from Postgres when available, demo otherwise."""
-    m = _db_metrics() or _demo_metrics()
-    return m
-
-
-@app.get("/api/opportunities")
-async def api_opportunities(limit: int = 50):
-    """High-intent opportunities for the main table."""
-    rows = db_query(
-        "SELECT o.id, o.company_id, c.name AS company_name, o.job_title, o.matched_pod, "
-        "o.match_score, o.source_platform, o.status, o.region, o.detected_date "
-        "FROM opportunities o LEFT JOIN companies c ON c.id = o.company_id "
-        "ORDER BY o.match_score DESC NULLS LAST LIMIT " + str(int(limit))
-    )
-    if rows:
-        return {"source": "postgres", "items": _serialize(rows)}
-    return {"source": "demo", "items": DEMO_OPPORTUNITIES[:limit]}
-
-
-@app.get("/api/companies")
-async def api_companies(limit: int = 100):
-    """Discovered companies for the Opportunity Map."""
-    rows = db_query(
-        "SELECT id, name, domain, region, source_platform, funding_stage, company_size, "
-        "detected_date FROM companies ORDER BY detected_date DESC LIMIT " + str(int(limit))
-    )
-    if rows:
-        return {"source": "postgres", "items": _serialize(rows)}
-    return {"source": "demo", "items": DEMO_COMPANIES[:limit]}
-
-
-@app.get("/api/signals")
-async def api_signals(limit: int = 20):
-    """Live signal feed — merges runtime events with DB-backed history."""
-    items = list(_events)
-    db_sig = db_query(
-        "SELECT o.id, o.detected_date, o.status, c.name AS company_name, o.source_platform "
-        "FROM opportunities o LEFT JOIN companies c ON c.id = o.company_id "
-        "ORDER BY o.detected_date DESC LIMIT 10"
-    )
-    if db_sig:
-        for r in db_sig:
-            name = r.get("company_name") or "Unknown company"
-            items.append({
-                "id": f"db-{r.get('id')}",
-                "time": r["detected_date"].isoformat() if isinstance(r.get("detected_date"), datetime) else str(r.get("detected_date")),
-                "type": "signal",
-                "message": f"{name} detected via {r.get('source_platform') or 'unknown source'} ({r.get('status')})",
-            })
-    if not items:
-        items = DEMO_SIGNALS[:limit]
-    items.sort(key=lambda x: x.get("time", ""), reverse=True)
-    return {"source": "postgres" if db_sig else "runtime", "items": items[:limit]}
-
-
-@app.post("/api/deploy")
-async def api_deploy(request: Request):
-    """Deploy Agent — kicks a discovery run event into the pipeline."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    target = body.get("target", "all sources")
-    _record_event("deploy", f"Agent deployed — scanning {target}", source="dashboard")
-    return {"status": "queued", "target": target, "note": "n8n mining-trigger workflow will pick this up"}
-
 
 # ---------------------------------------------------------------------------
 # Root endpoint
 # ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
-    return {"message": "Interceptor Hermes AI Agent is running", "version": "0.2.0"}
+    return {"message": "Interceptor Hermes API is running"}
+
+# ---------------------------------------------------------------------------
+# Event endpoint (for external sources to feed raw leads)
+# ---------------------------------------------------------------------------
+@app.post("/event")
+async def post_event(request: Request, background_tasks: BackgroundTasks):
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        payload = await request.body()
+    # Log the event
+    db = crm.SessionLocal()
+    event_log = crm.EventLog(
+        type=payload.get("type") if isinstance(payload, dict) else "unknown",
+        time=datetime.now(timezone.utc),
+        payload=payload if isinstance(payload, dict) else {"raw": str(payload)},
+    )
+    db.add(event_log)
+    db.commit()
+    db.close()
+    # If it's a raw lead, we could trigger enrichment, but we rely on the worker polling.
+    return {"status": "received", "payload": payload}
+
+# ---------------------------------------------------------------------------
+# Dashboard endpoints (proxy to CRM queries)
+# ---------------------------------------------------------------------------
+@app.get("/api/companies")
+async def get_companies():
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    companies = db.query(crm.Company).order_by(crm.Company.detected_date.desc()).limit(100).all()
+    db.close()
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "domain": c.domain,
+            "region": c.region,
+            "source_platform": c.source_platform,
+            "funding_stage": c.funding_stage,
+            "company_size": c.company_size,
+            "detected_date": c.detected_date.isoformat() if c.detected_date else None,
+            "status": c.status,
+        }
+        for c in companies
+    ]
+
+@app.post("/api/companies")
+async def create_company(company: dict):
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    db_company = crm.Company(
+        name=company.get("name"),
+        domain=company.get("domain"),
+        region=company.get("region"),
+        source_platform=company.get("source_platform"),
+        funding_stage=company.get("funding_stage"),
+        company_size=company.get("company_size"),
+        status=company.get("status"),
+    )
+    db.add(db_company)
+    db.commit()
+    db.refresh(db_company)
+    db.close()
+    return {
+        "id": db_company.id,
+        "name": db_company.name,
+        "domain": db_company.domain,
+        "region": db_company.region,
+        "source_platform": db_company.source_platform,
+        "funding_stage": db_company.funding_stage,
+        "company_size": db_company.company_size,
+        "detected_date": db_company.detected_date.isoformat() if db_company.detected_date else None,
+        "status": db_company.status,
+    }
+
+@app.get("/api/opportunities")
+async def get_opportunities():
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    opportunities = db.query(crm.Opportunity).order_by(crm.Opportunity.detected_date.desc()).limit(100).all()
+    db.close()
+    return [
+        {
+            "id": o.id,
+            "company_id": o.company_id,
+            "job_title": o.job_title,
+            "matched_pod": o.matched_pod,
+            "match_score": o.match_score,
+            "source_platform": o.source_platform,
+            "status": o.status,
+            "region": o.region,
+            "detected_date": o.detected_date.isoformat() if o.detected_date else None,
+        }
+        for o in opportunities
+    ]
+
+@app.post("/api/opportunities")
+async def create_opportunity(opportunity: dict):
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    db_opportunity = crm.Opportunity(
+        company_id=opportunity.get("company_id"),
+        job_title=opportunity.get("job_title"),
+        matched_pod=opportunity.get("matched_pod"),
+        match_score=opportunity.get("match_score"),
+        source_platform=opportunity.get("source_platform"),
+        status=opportunity.get("status"),
+        region=opportunity.get("region"),
+    )
+    db.add(db_opportunity)
+    db.commit()
+    db.refresh(db_opportunity)
+    db.close()
+    return {
+        "id": db_opportunity.id,
+        "company_id": db_opportunity.company_id,
+        "job_title": db_opportunity.job_title,
+        "matched_pod": db_opportunity.matched_pod,
+        "match_score": db_opportunity.match_score,
+        "source_platform": db_opportunity.source_platform,
+        "status": db_opportunity.status,
+        "region": db_opportunity.region,
+        "detected_date": db_opportunity.detected_date.isoformat() if db_opportunity.detected_date else None,
+    }
+
+@app.get("/api/signals")
+async def get_signals():
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    # For simplicity, we'll return recent opportunities as signals
+    signals = db.query(crm.Opportunity).order_by(crm.Opportunity.detected_date.desc()).limit(50).all()
+    db.close()
+    return [
+        {
+            "id": s.id,
+            "company_id": s.company_id,
+            "job_title": s.job_title,
+            "matched_pod": s.matched_pod,
+            "match_score": s.match_score,
+            "source_platform": s.source_platform,
+            "status": s.status,
+            "region": s.region,
+            "detected_date": s.detected_date.isoformat() if s.detected_date else None,
+        }
+        for s in signals
+    ]
+
+@app.get("/api/metrics")
+async def get_metrics():
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    total_companies = db.query(func.count(crm.Company.id)).scalar()
+    total_opportunities = db.query(func.count(crm.Opportunity.id)).scalar()
+    total_contacts = db.query(func.count(crm.Contact.id)).scalar()
+    total_hitl_pending = db.query(func.count(crm.Hitl.id)).filter(crm.Hitl.status == "pending").scalar()
+    total_hitl_approved = db.query(func.count(crm.Hitl.id)).filter(crm.Hitl.status == "approved").scalar()
+    total_outbound_sent = db.query(func.count(crm.OutboundLog.id)).filter(crm.OutboundLog.status == "sent").scalar()
+    db.close()
+    return {
+        "companies": total_companies,
+        "opportunities": total_opportunities,
+        "contacts": total_contacts,
+        "hitl_pending": total_hitl_pending,
+        "hitl_approved": total_hitl_approved,
+        "outbound_sent": total_outbound_sent,
+    }
+
+# ---------------------------------------------------------------------------
+# HITL endpoints
+# ---------------------------------------------------------------------------
+@app.post("/hitl/generate")
+async def hitl_generate(request: Request):
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    company_id = payload.get("company_id")
+    contact_id = payload.get("contact_id")
+    if not company_id or not contact_id:
+        raise HTTPException(status_code=400, detail="company_id and contact_id required")
+    db = crm.SessionLocal()
+    company = db.query(crm.Company).filter(crm.Company.id == company_id).first()
+    contact = db.query(crm.Contact).filter(crm.Contact.id == contact_id).first()
+    if not company or not contact:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company or contact not found")
+    # Generate a message using the LLM
+    message_text = generate_message(company.name, contact.first_name, contact.last_name, contact.title or "")
+    hitl = crm.Hitl(
+        company_id=company_id,
+        contact_id=contact_id,
+        message_text=message_text,
+        status="pending",
+    )
+    db.add(hitl)
+    db.commit()
+    db.refresh(hitl)
+    db.close()
+    return {
+        "id": hitl.id,
+        "company_id": hitl.company_id,
+        "contact_id": hitl.contact_id,
+        "message_text": hitl.message_text,
+        "status": hitl.status,
+        "created_at": hitl.created_at.isoformat() if hitl.created_at else None,
+    }
+
+@app.get("/hitl/pending")
+async def hitl_pending():
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    hitls = db.query(crm.Hitl).filter(crm.Hitl.status == "pending").order_by(crm.Hitl.created_at.desc()).limit(50).all()
+    db.close()
+    return [
+        {
+            "id": h.id,
+            "company_id": h.company_id,
+            "contact_id": h.contact_id,
+            "message_text": h.message_text,
+            "status": h.status,
+            "created_at": h.created_at.isoformat() if h.created_at else None,
+        }
+        for h in hitls
+    ]
+
+@app.post("/hitl/approve/{hitl_id}")
+async def hitl_approve(hitl_id: int):
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    hitl = db.query(crm.Hitl).filter(crm.Hitl.id == hitl_id).first()
+    if not hitl:
+        db.close()
+        raise HTTPException(status_code=404, detail="HITL not found")
+    hitl.status = "approved"
+    hitl.approved_at = datetime.now(timezone.utc)
+    db.commit()
+    db.close()
+    return {"status": "approved", "hitl_id": hitl_id}
+
+@app.post("/hitl/reject/{hitl_id}")
+async def hitl_reject(hitl_id: int):
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    hitl = db.query(crm.Hitl).filter(crm.Hitl.id == hitl_id).first()
+    if not hitl:
+        db.close()
+        raise HTTPException(status_code=404, detail="HITL not found")
+    hitl.status = "rejected"
+    db.commit()
+    db.close()
+    return {"status": "rejected", "hitl_id": hitl_id}
+
+# ---------------------------------------------------------------------------
+# Meeting booking endpoint
+# ---------------------------------------------------------------------------
+@app.post("/meeting/booked")
+async def meeting_booked(request: Request):
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    hitl_id = payload.get("hitl_id")
+    platform = payload.get("platform", "unknown")
+    meet_url = payload.get("meet_url")
+    notes = payload.get("notes")
+    if not hitl_id:
+        raise HTTPException(status_code=400, detail="hitl_id required")
+    db = crm.SessionLocal()
+    hitl = db.query(crm.Hitl).filter(crm.Hitl.id == hitl_id).first()
+    if not hitl:
+        db.close()
+        raise HTTPException(status_code=404, detail="HITL not found")
+    meeting = crm.Meeting(
+        hitl_id=hitl_id,
+        platform=platform,
+        meet_url=meet_url,
+        notes=notes,
+    )
+    db.add(meeting)
+    # Optionally mark hitl as having a meeting? We'll keep status as approved.
+    db.commit()
+    db.close()
+    return {"status": "meeting booked", "meeting_id": meeting.id}
+
+# ---------------------------------------------------------------------------
+# Deploy endpoint (to trigger a new discovery run)
+# ---------------------------------------------------------------------------
+@app.post("/api/deploy")
+async def deploy(background_tasks: BackgroundTasks):
+    # Trigger the discovery scheduler to run once
+    background_tasks.add_task(run_discovery_once)
+    return {"status": "deployment queued"}
+
+# ---------------------------------------------------------------------------
+# Additional endpoint to trigger enrichment manually (optional)
+# ---------------------------------------------------------------------------
+@app.post("/api/enrich")
+async def enrich_now(background_tasks: BackgroundTasks):
+    background_tasks.add_task(lambda: logger.info("Manual enrichment trigger not implemented in this endpoint"))
+    return {"status": "enrichment queued"}
+
+# ---------------------------------------------------------------------------
+# Error handling
+# ---------------------------------------------------------------------------
+@app.exception_handler(404)
+async def not_found(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+@app.exception_handler(500)
+async def internal_error(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
