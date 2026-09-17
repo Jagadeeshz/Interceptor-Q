@@ -4,7 +4,12 @@ Loads settings from environment variables with sensible defaults.
 """
 
 import os
+from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load .env from the repository root (no-op if already provided as env vars)
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 class Settings:
     def __init__(self):
@@ -13,12 +18,12 @@ class Settings:
             "POSTGRES_DATABASE_URL",
             "postgresql://interceptor_admin:***@postgres:5432/hermes_db",
         )
-        # LLM provider
-        self.llm_provider = os.getenv("LLM_PROVIDER", "deepseek")
-        self.llm_model = os.getenv("LLM_MODEL", "deepseek-coder-v1.5")
+        # LLM provider (OpenAI-compatible endpoint, e.g. NVIDIA NIM)
+        self.llm_provider = os.getenv("LLM_PROVIDER", "nvidia")
+        self.llm_model = os.getenv("LLM_MODEL", "deepseek-ai/deepseek-v4-flash-0731")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
         self.llm_base_url = os.getenv(
-            "LLM_BASE_URL", "https://api.deepseek.com/v1"
+            "LLM_BASE_URL", "https://integrate.api.nvidia.com/v1"
         )
         # Outbound credentials
         self.mautic_url = os.getenv("MAUTIC_URL", "")

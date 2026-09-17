@@ -1,0 +1,9 @@
+INFO:     Started server process [15136]
+INFO:     Waiting for application startup.
+INFO:hermes:Interceptor Hermes starting — dashboard API live
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+WARNING:hermes:DB query failed (falling back to demo data): (psycopg2.OperationalError) could not translate host name "postgres" to address: Name or service not known
+
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+INFO:     127.0.0.1:65117 - "GET /health HTTP/1.1" 200 OK

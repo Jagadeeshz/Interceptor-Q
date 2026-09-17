@@ -1,0 +1,146 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Interceptor Hermes Metrics",
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "10s",
+    "panels": [
+      {
+        "type": "graph",
+        "title": "HTTP Requests Total",
+        "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total[5m])) by (method, handler, status_code)",
+            "legendFormat": "{{method}} {{handler}} {{status_code}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          { "format": "reqps", "label": "req/s", "logBase": 1, "min": null, "max": null },
+          { "format": "short", "show": true, "logBase": 1, "min": null, "max": null }
+        ]
+      },
+      {
+        "type": "graph",
+        "title": "HTTP Request Duration",
+        "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, method, handler))",
+            "legendFormat": "{{method}} {{handler}} (95th)",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, method, handler))",
+            "legendFormat": "{{method}} {{handler}} (50th)",
+            "refId": "B"
+          }
+        ],
+        "yaxes": [
+          { "format": "s", "label": "seconds", "logBase": 1, "min": 0, "max": null },
+          { "format": "short", "show": true }
+        ]
+      },
+      {
+        "type": "gauge",
+        "title": "Database Status",
+        "gridPos": { "x": 0, "y": 8, "w": 6, "h": 4 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "up{job=\"hermes\"}",
+            "legendFormat": "{{instance}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 1 }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "showThresholdLabels": true,
+          "showThresholdMarkers": true
+        }
+      },
+      {
+        "type": "stat",
+        "title": "Total Companies",
+        "gridPos": { "x": 6, "y": 8, "w": 6, "h": 4 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "hermes_companies_total",
+            "legendFormat": "",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "stat",
+        "title": "Total Opportunities",
+        "gridPos": { "x": 12, "y": 8, "w": 6, "h": 4 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "hermes_opportunities_total",
+            "legendFormat": "",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "type": "stat",
+        "title": "HITL Pending",
+        "gridPos": { "x": 18, "y": 8, "w": 6, "h": 4 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "hermes_hitl_pending_total",
+            "legendFormat": "",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          },
+          "overrides": []
+        }
+      }
+    ],
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": []
+    }
+  },
+  "overwrite": true
+}

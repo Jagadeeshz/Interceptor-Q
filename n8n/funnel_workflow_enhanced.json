@@ -1,0 +1,400 @@
+{
+  "name": "Interceptor Full Funnel Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": [
+          {
+            "mode": "everyHours",
+            "value": 8
+          }
+        ]
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/api/deploy",
+        "options": {},
+        "url": "http://hermes:8000"
+      },
+      "name": "Trigger Discovery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "time": 5,
+        "unit": "minutes"
+      },
+      "name": "Wait for Discovery",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "/api/companies",
+        "options": {},
+        "url": "http://hermes:8000"
+      },
+      "name": "Get Companies",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "/api/contacts",
+        "options": {},
+        "url": "http://hermes:8000"
+      },
+      "name": "Get Contacts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "boolean": [
+            {
+              "name": "continueProcessing",
+              "value": "={{ ($json[\"Get Companies\"] || []).length > 0 && ($json[\"Get Contacts\"] || []).length > 0 }}"
+            }
+          ]
+        }
+      },
+      "name": "Check Data Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "companyId",
+              "value": "={{ $json[\"id\"] }}"
+            },
+            {
+              "name": "contactId",
+              "value": "={{ $json[\"id\"] }}"
+            }
+          ]
+        }
+      },
+      "name": "Split Companies",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [
+        1750,
+        200
+      ],
+      "partitionSize": 1
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "contactId",
+              "value": "={{ $json[\"id\"] }}"
+            }
+          ]
+        }
+      },
+      "name": "Split Contacts",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [
+        1750,
+        400
+      ],
+      "partitionSize": 1
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/hitl/generate",
+        "options": {},
+        "bodyParametersJson": "{\"company_id\": {{$json[\"companyId\"]}},\"contact_id\": {{$json[\"contactId\"]}}}",
+        "url": "http://hermes:8000"
+      },
+      "name": "Generate HITL for Pair",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"status\"] }}",
+              "operation": "equals",
+              "value2": "pending"
+            }
+          ]
+        }
+      },
+      "name": "Check HITL Generation",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "time": 30,
+        "unit": "minutes"
+      },
+      "name": "Wait for HITL Review",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        2500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/hitl/approve/{{$json[\"id\"]}}",
+        "options": {},
+        "url": "http://hermes:8000"
+      },
+      "name": "Approve HITL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        2750,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/meeting/booked",
+        "options": {},
+        "bodyParametersJson": "{\"hitl_id\": {{$json[\"id\"]}},\"platform\": \"linkedin\",\"meet_url\": \"https://calendly.com/example\",\"notes\": \"Meeting booked via n8n workflow\"}",
+        "url": "http://hermes:8000"
+      },
+      "name": "Book Meeting (Optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "name": "End",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3250,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Trigger Discovery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Discovery": {
+      "main": [
+        [
+          {
+            "node": "Wait for Discovery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Discovery": {
+      "main": [
+        [
+          {
+            "node": "Get Companies",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Contacts",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get Companies": {
+      "main": [
+        [
+          {
+            "node": "Check Data Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Contacts": {
+      "main": [
+        [
+          {
+            "node": "Check Data Available",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Check Data Available": {
+      "main": [
+        [
+          {
+            "node": "Split Companies",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "End",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Split Companies": {
+      "main": [
+        [
+          {
+            "node": "Split Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Contacts": {
+      "main": [
+        [
+          {
+            "node": "Generate HITL for Pair",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate HITL for Pair": {
+      "main": [
+        [
+          {
+            "node": "Check HITL Generation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check HITL Generation": {
+      "main": [
+        [
+          {
+            "node": "Wait for HITL Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "End",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Wait for HITL Review": {
+      "main": [
+        [
+          {
+            "node": "Approve HITL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve HITL": {
+      "main": [
+        [
+          {
+            "node": "Book Meeting (Optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Book Meeting (Optional)": {
+      "main": [
+        [
+          {
+            "node": "End",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "id": "1"
+}

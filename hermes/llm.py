@@ -1,61 +1,86 @@
 """
 LLM wrapper for generating personalized outreach messages.
-Supports OpenAI-compatible endpoints (including DeepSeek).
+Routes all requests through the OpenAI-compatible Python SDK
+against any compatible endpoint (default: NVIDIA NIM).
 """
 
-import os
-import httpx
 import logging
+from typing import Optional
+
+from openai import AsyncOpenAI
+
 from hermes.config import settings
 
 log = logging.getLogger("hermes.llm")
 
-# LLM configuration from environment variables, with sensible defaults
-LLM_ENDPOINT = getattr(settings, 'llm_endpoint', os.getenv("LLM_ENDPOINT", "https://api.deepseek.com/v1/chat/completions"))
-LLM_MODEL = getattr(settings, 'llm_model', os.getenv("LLM_MODEL", "deepseek-chat"))
-LLM_KEY = getattr(settings, 'llm_key', os.getenv("LLM_KEY", ""))
+LLM_KEY: str = settings.llm_api_key
+LLM_BASE_URL: str = settings.llm_base_url
+LLM_MODEL: str = settings.llm_model
+
+_client: Optional[AsyncOpenAI] = None
+
+
+def _get_client() -> AsyncOpenAI:
+    """Lazily initialise a reusable AsyncOpenAI client."""
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(api_key=LLM_KEY, base_url=LLM_BASE_URL)
+    return _client
+
+
+_FALLBACK_TEMPLATE = (
+    "Hi {first_name},\n\n"
+    "I came across {company_name} and was impressed by your work in "
+    "{industry}. I believe there is a great opportunity for us to "
+    "collaborate. Let us schedule a quick chat to explore synergies.\n\n"
+    "Best regards,\nThe Hermes Team"
+)
+
 
 async def generate_message(company: dict, contact: dict) -> str:
     """
-    Generate a personalized outreach message using an LLM.
-    :param company: dict with keys like 'name', 'domain', 'industry', etc.
-    :param contact: dict with keys like 'first_name', 'last_name', 'title', 'email', etc.
+    Generate a personalised outreach message using the configured LLM.
+
+    :param company: dict with keys ``name``, ``domain``, ``industry`` etc.
+    :param contact: dict with keys ``first_name``, ``last_name``, ``title`` etc.
     :return: generated message string
     """
+    first_name = contact.get("first_name", "there")
+    company_name = company.get("name", "your company")
+    industry = company.get("industry", "the industry")
+
     if not LLM_KEY:
-        # Fallback to a template if no API key is set
-        return f"Hi {contact.get('first_name', 'there')},\n\nI came across {company.get('name', 'your company')} and was impressed by your work in {company.get('industry', 'the industry')}. I believe there's a great opportunity for us to collaborate. Let's schedule a quick chat to explore synergies.\n\nBest regards,\nThe Hermes Team"
+        log.warning("LLM_API_KEY not set – using fallback template")
+        return _FALLBACK_TEMPLATE.format(
+            first_name=first_name,
+            company_name=company_name,
+            industry=industry,
+        )
 
-    prompt = f"""
-    You are a professional recruiter. Write a concise, personalized LinkedIn/email message
-    to {contact.get('first_name', '')} {contact.get('last_name', '')} at {company.get('name', 'the company')}.
-    Reference one specific detail from their profile or recent activity.
-    Keep it under 150 words, friendly, and include a clear call‑to‑action (e.g., “Let’s schedule a 15‑min chat this week.”).
-    """
+    prompt = (
+        "You are a professional recruiter. Write a concise, personalised "
+        f"LinkedIn/email message to {contact.get('first_name', '')} "
+        f"{contact.get('last_name', '')} at {company_name}. "
+        "Reference one specific detail from their profile or recent activity. "
+        "Keep it under 150 words, friendly, and include a clear call-to-action "
+        '(e.g., "Let us schedule a 15-min chat this week.").'
+    )
 
-    payload = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are an expert recruitment copywriter."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.7,
-        "max_tokens": 200,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {LLM_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(LLM_ENDPOINT, json=payload, headers=headers, timeout=30.0)
-            response.raise_for_status()
-            data = response.json()
-            # Extract the generated text from the response (OpenAI/DeepSeek format)
-            return data["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            log.error(f"LLM generation failed: {e}")
-            # Fallback to a template on error
-            return f"Hi {contact.get('first_name', 'there')},\n\nI came across {company.get('name', 'your company')} and was impressed by your work in {company.get('industry', 'the industry')}. I believe there's a great opportunity for us to collaborate. Let's schedule a quick chat to explore synergies.\n\nBest regards,\nThe Hermes Team"
+    try:
+        response = await _get_client().chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "You are an expert recruitment copywriter."},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=200,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        log.error("LLM generation failed: %s", e)
+        return _FALLBACK_TEMPLATE.format(
+            first_name=first_name,
+            company_name=company_name,
+            industry=industry,
+        )

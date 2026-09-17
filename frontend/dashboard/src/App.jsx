@@ -1,33 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
+import useFetch from './hooks/useFetch';
+import HitlList from './components/HitlList';
 
-const apiBase = '/api';
-
-// Helper to fetch with error handling
-const useFetch = (endpoint) => {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const res = await fetch("apiBase + endpoint");
-        if (!res.ok) throw new Error("'HTTP ' + res.status");
-        const json = await res.json();
-        setData(json);
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchData();
-  }, [endpoint]);
-
-  return { data, loading, error };
-};
-
-// Sidebar item component (unchanged)
 const SidebarItem = ({ icon, label, active, onClick }) => (
   <div
     onClick={onClick}
@@ -395,6 +369,21 @@ const App = () => {
       );
       break;
 
+    case 'hitl':
+      tabContent = (
+        <>
+          <div className="spectrum-bar" style={{ marginBottom: '24px' }}></div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+            <h1 style={{ margin: 0, fontSize: '24px', fontWeight: '600', color: 'var(--bindu-shunya)' }}>HITL Approvals</h1>
+            <span style={{ fontSize: '12px', color: 'var(--bindu-shunya-4)' }}>Review generated outreach messages before they are sent.</span>
+          </div>
+          <div className="card-panel" style={{ background: 'var(--bindu-void-1)' }}>
+            <HitlList />
+          </div>
+        </>
+      );
+      break;
+
     default:
       tabContent = <div>Loading...</div>;
   }
@@ -411,6 +400,7 @@ const App = () => {
           <SidebarItem icon="🔍" label="Opportunity Map" active={activeTab === 'map'} onClick={() => setActiveTab('map')} />
           <SidebarItem icon="⚡" label="Enrichment Pipeline" active={activeTab === 'pipeline'} onClick={() => setActiveTab('pipeline')} />
           <SidebarItem icon="📡" label="Signal Monitor" active={activeTab === 'signals'} onClick={() => setActiveTab('signals')} />
+          <SidebarItem icon="📋" label="HITL" active={activeTab === 'hitl'} onClick={() => setActiveTab('hitl')} />
           <SidebarItem icon="⚙️" label="System Config" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
         </div>
         <div style={{ marginTop: 'auto', padding: '12px', background: 'var(--bindu-void-3)', borderRadius: '8px', border: '1px solid rgba(250,248,242,0.05)' }}>

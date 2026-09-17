@@ -1,0 +1,183 @@
+{
+  "name": "Interceptor Funnel Workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/hitl/generate",
+        "options": {},
+        "bodyParametersJson": "{\"company_id\": {{$json[\"company_id\"]}},\"contact_id\": {{$json[\"contact_id\"]}}}",
+        "url": "http://hermes:8000"
+      },
+      "name": "Generate HITL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"status\"] }}",
+              "operation": "equals",
+              "value2": "pending"
+            }
+          ]
+        }
+      },
+      "name": "Check Generation",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "time": 30,
+        "unit": "seconds"
+      },
+      "name": "Wait for Review",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/hitl/approve/{{$json[\"id\"]}}",
+        "options": {},
+        "url": "http://hermes:8000"
+      },
+      "name": "Approve HITL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "/meeting/booked",
+        "options": {},
+        "bodyParametersJson": "{\"hitl_id\": {{$json[\"id\"]}},\"platform\": \"linkedin\",\"meet_url\": \"https://calendly.com/example\",\"notes\": \"Meeting booked via n8n workflow\"}",
+        "url": "http://hermes:8000"
+      },
+      "name": "Book Meeting (Optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "name": "End",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1750,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Generate HITL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate HITL": {
+      "main": [
+        [
+          {
+            "node": "Check Generation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Generation": {
+      "main": [
+        [
+          {
+            "node": "Wait for Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "End",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Review": {
+      "main": [
+        [
+          {
+            "node": "Approve HITL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve HITL": {
+      "main": [
+        [
+          {
+            "node": "Book Meeting (Optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Book Meeting (Optional)": {
+      "main": [
+        [
+          {
+            "node": "End",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "id": "1"
+}

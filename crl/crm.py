@@ -40,9 +40,9 @@ class Company(Base):
     detected_date = Column(DateTime(timezone=True), server_default=func.now())
     last_enriched = Column(DateTime(timezone=True))
 
-    opportunities = relationship("Opportunity", back_populates="company", cascade="all, delete-orphen")
-    enrichment = relationship("Enrichment", back_populates="company", uselist=False, cascade="all, delete-orphen")
-    contacts = relationship("Contact", back_populates="company", cascade="all, delete-orphen")
+    opportunities = relationship("Opportunity", back_populates="company", cascade="all, delete-orphan")
+    enrichment = relationship("Enrichment", back_populates="company", uselist=False, cascade="all, delete-orphan")
+    contacts = relationship("Contact", back_populates="company", cascade="all, delete-orphan")
 
 
 class Opportunity(Base):
@@ -64,8 +64,8 @@ class Opportunity(Base):
     enrichment_jsonb = Column(JSON, default={})
 
     company = relationship("Company", back_populates="opportunities")
-    responses = relationship("Response", back_populates="opportunity", cascade="all, delete-orphen")
-    bookings = relationship("Booking", back_populates="opportunity", cascade="all, delete-orphen")
+    responses = relationship("Response", back_populates="opportunity", cascade="all, delete-orphan")
+    bookings = relationship("Booking", back_populates="opportunity", cascade="all, delete-orphan")
 
 
 class Contact(Base):
@@ -93,7 +93,7 @@ class Enrichment(Base):
     company_id = Column(String(36), ForeignKey("companies.id"), nullable=False, unique=True)
     data = Column(JSON, nullable=False, default={})
     enriched_date = Column(DateTime(timezone=True), server_default=func.now())
-    source = Column(String(100), nullableFalse)  # apollo, linkedin, manual
+    source = Column(String(100), nullable=False)  # apollo, linkedin, manual
 
     company = relationship("Company", back_populates="enrichment")
 

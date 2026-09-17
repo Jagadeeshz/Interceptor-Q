@@ -31,6 +31,9 @@ from hermes.llm import generate_message
 # Import config for settings
 from hermes.config import settings
 
+# Prometheus instrumentation
+from prometheus_fastapi_instrumentator import Instrumentator
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("hermes")
 
@@ -66,6 +69,11 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="Interceptor Hermes", version="0.2.0", lifespan=lifespan)
+
+# ---------------------------------------------------------------------------
+# Prometheus instrumentation
+# ---------------------------------------------------------------------------
+Instrumentator().instrument(app).expose(app)
 
 # ---------------------------------------------------------------------------
 # Authentication middleware (API Key)
@@ -259,25 +267,28 @@ async def get_metrics():
     if not _db_available:
         return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
     db = crm.SessionLocal()
-    total_companies = db.query(func.count(crm.Company.id)).scalar()
-    total_opportunities = db.query(func.count(crm.Opportunity.id)).scalar()
-    total_contacts = db.query(func.count(crm.Contact.id)).scalar()
-    total_hitl_pending = db.query(func.count(crm.Hitl.id)).filter(crm.Hitl.status == "pending").scalar()
-    total_hitl_approved = db.query(func.count(crm.Hitl.id)).filter(crm.Hitl.status == "approved").scalar()
-    total_outbound_sent = db.query(func.count(crm.OutboundLog.id)).filter(crm.OutboundLog.status == "sent").scalar()
-    db.close()
-    return {
-        "companies": total_companies,
-        "opportunities": total_opportunities,
-        "contacts": total_contacts,
-        "hitl_pending": total_hitl_pending,
-        "hitl_approved": total_hitl_approved,
-        "outbound_sent": total_outbound_sent,
-    }
-
-# ---------------------------------------------------------------------------
-# HITL endpoints
-# ---------------------------------------------------------------------------
+    try:
+        # Leads discovered: total opportunities
+        leads_discovered = db.query(func.count(crm.Opportunity.id)).scalar() or 0
+        # Enrichment rate: percentage of opportunities that have approved HITL
+        total_opps = leads_discovered
+        approved_hitl = db.query(func.count(crm.Hitl.id)).filter(crm.Hitl.status == "approved").scalar() or 0
+        enrichment_rate = (approved_hitl / total_opps * 100) if total_opps > 0 else 0
+        # Active signals: opportunities with status READY (or just total opportunities? We'll use READY)
+        active_signals = db.query(func.count(crm.Opportunity.id)).filter(crm.Opportunity.status == "READY").scalar() or 0
+        # Conversion probability: percentage of approved HITL that resulted in a meeting
+        total_meetings = db.query(func.count(crm.Meeting.id)).scalar() or 0
+        conversion_prob = (total_meetings / approved_hitl * 100) if approved_hitl > 0 else 0
+        # For simplicity, trends are set to 0 (no change)
+        metrics = {
+            "leads_discovered": {"value": leads_discovered, "trend": 0},
+            "enrichment_rate": {"value": round(enrichment_rate, 2), "trend": 0},
+            "active_signals": {"value": active_signals, "trend": 0},
+            "conversion_prob": {"value": round(conversion_prob, 2), "trend": 0}
+        }
+    finally:
+        db.close()
+    return metrics
 @app.post("/hitl/generate")
 async def hitl_generate(request: Request):
     if not _db_available:
@@ -355,6 +366,70 @@ async def hitl_approve(hitl_id: int):
 async def hitl_reject(hitl_id: int):
     if not _db_available:
         return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+    db = crm.SessionLocal()
+    hitl = db.query(crm.Hitl).filter(crm.Hitl.id == hitl_id).first()
+    if not hitl:
+        db.close()
+        raise HTTPException(status_code=404, detail="HITL not found")
+    hitl.status = "rejected"
+    db.commit()
+    db.close()
+    return {"status": "rejected", "hitl_id": hitl_id}
+
+# ---------------------------------------------------------------------------
+# HITL admin endpoints (dashboard queue) – /api prefix for the React dashboard
+# ---------------------------------------------------------------------------
+@app.get("/api/hitl/pending")
+async def api_hitl_pending():
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Service unavailable"})
+    db = crm.SessionLocal()
+    hitls = (
+        db.query(crm.Hitl)
+        .filter(crm.Hitl.status == "pending")
+        .order_by(crm.Hitl.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    result = [
+        {
+            "id": h.id,
+            "company_id": h.company_id,
+            "contact_id": h.contact_id,
+            "company_name": h.company.name if h.company else None,
+            "contact_name": (
+                f"{h.contact.first_name} {h.contact.last_name}"
+                if h.contact
+                else None
+            ),
+            "message_text": h.message_text,
+            "status": h.status,
+            "created_at": h.created_at.isoformat() if h.created_at else None,
+        }
+        for h in hitls
+    ]
+    db.close()
+    return result
+
+@app.post("/api/hitl/approve/{hitl_id}")
+async def api_hitl_approve(hitl_id: int):
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Service unavailable"})
+    db = crm.SessionLocal()
+    hitl = db.query(crm.Hitl).filter(crm.Hitl.id == hitl_id).first()
+    if not hitl:
+        db.close()
+        raise HTTPException(status_code=404, detail="HITL not found")
+    hitl.status = "approved"
+    hitl.approved_at = datetime.now(timezone.utc)
+    db.commit()
+    db.close()
+    return {"status": "approved", "hitl_id": hitl_id}
+
+@app.post("/api/hitl/reject/{hitl_id}")
+async def api_hitl_reject(hitl_id: int):
+    if not _db_available:
+        return JSONResponse(status_code=503, content={"detail": "Service unavailable"})
     db = crm.SessionLocal()
     hitl = db.query(crm.Hitl).filter(crm.Hitl.id == hitl_id).first()
     if not hitl:
